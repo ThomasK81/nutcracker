@@ -159,7 +159,6 @@ func establishWit() {
 	defer bytexml.Close()
 	currentChapter := "prelim"
 	decoder := xml.NewDecoder(bytexml)
-	count := 0
 	for {
 		t, _ := decoder.Token()
 		if t == nil {
@@ -235,7 +234,7 @@ func establishWit() {
 			}
 		}
 	}
-	log.Println("Done.", count)
+	log.Println("Done.")
 }
 
 func main() {
@@ -301,7 +300,7 @@ func main() {
 						for _, v2 := range v.Abbrevs {
 							firstid := v2.Name
 							resolution := []string{}
-							firstid = strings.ReplaceAll(firstid, "^!", "Note")
+							firstid = strings.ReplaceAll(firstid, "^!", "_Note")
 							firstid = strings.ReplaceAll(firstid, "(", "")
 							firstid = strings.ReplaceAll(firstid, ")", "")
 							firstid = strings.TrimSpace(firstid)
@@ -501,9 +500,17 @@ func main() {
 	passageURNs = append(passageURNs, passageURN)
 	lemmaCount++
 
-	log.Println(len(basetext))
-	log.Println(len(passageURNs))
+	log.Println("writing report and output.cex...")
+	noteExtract := regexp.MustCompile(`_Note[^_]+`)
 
+	report.WriteString("### Sigla Abbreviations ###\n\n")
+	inverseSiglaMap := make(map[string]string)
+	for k, v := range siglaMap {
+		inverseSiglaMap[v] = k
+		report.WriteString(fmt.Sprintln("key:", k, "value:", v))
+	}
+	report.WriteString("\n\n")
+	report.WriteString("### Readings & Variants ###\n\n")
 	for key, value := range basetext {
 		keyStr := passageURNs[key]
 		report.WriteString("---------------------------------------------")
@@ -528,16 +535,30 @@ func main() {
 			witnessURN := passageBase + witkey + ".token:"
 			reading, ok := positionMap[keyStr][witkey]
 			if !ok {
-				reading = "[[NA]]"
+				newkey := strings.Join(strings.Split(keyStr, ".")[:len(strings.Split(keyStr, "."))-1], ".")
+				there := witnessRange[newkey][inverseSiglaMap[witkey]]
+				if !there {
+					newkey2 := strings.Join(strings.Split(witkey, "_")[:len(strings.Split(witkey, "_"))-1], "_")
+					there = witnessRange[newkey][inverseSiglaMap[newkey2]]
+				}
+				if !there {
+					newkey2 := noteExtract.ReplaceAllString(witkey, "")
+					there = witnessRange[newkey][inverseSiglaMap[newkey2]]
+				}
+				if !there {
+					newkey2 := noteExtract.ReplaceAllString(witkey, "")
+					newkey2 = strings.Join(strings.Split(newkey2, "_")[:len(strings.Split(newkey2, "_"))-1], "_")
+					there = witnessRange[newkey][inverseSiglaMap[newkey2]]
+				}
+				if there {
+					reading = value
+				} else {
+					reading = "[[NA]]"
+				}
 			}
 			for index, element := range customSplit(reading) {
 				idPassage := witnessURN + keyStr + "_" + strconv.Itoa(index+1)
 				passages := editionsMap[witnessURN]
-				// only for testing
-				if element == "" {
-					element = " "
-				}
-				//
 				tmpPassage := CTSPassage{ID: idPassage, Passage: element}
 				passages = append(passages, tmpPassage)
 				tmpalignment.Token = append(tmpalignment.Token, tmpPassage)
@@ -547,6 +568,10 @@ func main() {
 		}
 		alignments = append(alignments, tmpalignment)
 	}
+
+	report.WriteString("\n\n")
+	report.WriteString("$$$ First Passage $$$")
+
 	for _, v := range editionsMap {
 		for i := range v {
 			report.WriteString(fmt.Sprintln(v[i]))
@@ -555,15 +580,22 @@ func main() {
 		break
 	}
 
-	for k, v := range siglaMap {
-		report.WriteString(fmt.Sprintln("key:", k, "value:", v))
-	}
 	report.WriteString(fmt.Sprintln("Parsed", len(alignments), "lemmata..."))
 	log.Println("Parsed", len(alignments), "lemmata...")
 	log.Println(len(basetext))
 
+	report.WriteString("\n\n")
+	report.WriteString("_Witness Present?__\n")
 	for k, v := range witnessRange {
-		report.WriteString("______________________________")
+		report.WriteString(fmt.Sprintln("Passage:", k))
+		for k2, v2 := range v {
+			report.WriteString(fmt.Sprintln("key:", k2, "key2:", siglaMap[k2], "value:", v2))
+		}
+	}
+
+	report.WriteString("\n\n")
+	report.WriteString("+++Conjectures+++\n")
+	for k, v := range secPositionMap {
 		report.WriteString(fmt.Sprintln("Passage:", k))
 		for k2, v2 := range v {
 			report.WriteString(fmt.Sprintln("key:", k2, "value:", v2))
