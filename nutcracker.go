@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 type WitnessList struct {
@@ -33,7 +34,18 @@ type Milestone struct {
 	Type string `xml:"unit,attr"`
 }
 
+type Anchor struct {
+	ID string `xml:"id,attr"`
+}
+
+type AppData2 struct {
+	Type  string `xml:"type,attr"`
+	Inner string `xml:",innerxml"`
+}
+
 type AppData struct {
+	Type       string      `xml:"type,attr"`
+	ToAnchor   string      `xml:"to,attr"`
 	Variant    []Variants  `xml:"rdg"`
 	WitDetails []WitDetail `xml:"witDetail"`
 }
@@ -45,9 +57,9 @@ type Variants struct {
 }
 
 type WitDetail struct {
-	Target string   `xml:"target,attr"`
-	Wit    string   `xml:"wit,attr"`
-	Detail []string `xml:"hi"`
+	Target string `xml:"target,attr"`
+	Wit    string `xml:"wit,attr"`
+	Detail string `xml:",chardata"`
 }
 
 type Witness struct {
@@ -65,10 +77,9 @@ type CTSPassage struct {
 	Passage string
 }
 
-var allowedDetail = []string{"ac", "pc", "v1"}
+var allowedDetail = []string{"ac", "pc"}
 
-var splits = []rune{' ', '‌'}
-var splitTests = []rune{' ', '‌', '|'}
+var splits = []rune{' ', '‌', '|', '〉'}
 
 func testSplit(char rune) bool {
 	for _, v := range splits {
@@ -79,30 +90,48 @@ func testSplit(char rune) bool {
 	return (false)
 }
 
-func testSplit2(char rune) bool {
-	for _, v := range splitTests {
-		if v == char {
-			return (true)
+func anyLetters(s string) bool {
+	for _, v := range s {
+		if unicode.IsLetter(v) {
+			return true
 		}
 	}
-	return (false)
+	return false
 }
 
 func customSplit(passage string) (tokens []string) {
 	found := false
+	leadingWS := true
 	tmpstring := ""
+
 	for _, char := range passage {
-		if !testSplit2(char) && found == true {
-			tokens = append(tokens, tmpstring)
-			tmpstring = ""
-			found = false
+		if !unicode.IsLetter(char) && leadingWS {
+			tmpstring = tmpstring + string(char)
+			continue
 		}
-		tmpstring = tmpstring + string(char)
+		leadingWS = false
+		if found == true {
+			if testSplit(char) {
+				tmpstring = tmpstring + string(char)
+				continue
+			} else {
+				tokens = append(tokens, tmpstring)
+				tmpstring = string(char)
+				found = false
+				leadingWS = true
+				continue
+			}
+		}
 		if testSplit(char) {
 			found = true
 		}
+		tmpstring = tmpstring + string(char)
 	}
-	tokens = append(tokens, tmpstring)
+	if !anyLetters(tmpstring) && len(tokens) > 0 {
+		tokens[len(tokens)-1] = tokens[len(tokens)-1] + tmpstring
+	} else {
+		tokens = append(tokens, tmpstring)
+	}
 	return (tokens)
 }
 
@@ -110,11 +139,109 @@ const passageBase = "urn:cts:sktlit:skt0001.nyaya002."
 
 var editionsMap = make(map[string][]CTSPassage)
 var witnessMap = make(map[string]bool)
-var siglaMap = make(map[string][]string)
+var secWitnessMap = make(map[string]bool)
+var siglaMap = make(map[string]string)
 var alignments = []Alignment{}
 
+var witnessRange = make(map[string]map[string]bool)
+var witBool = make(map[string]bool)
+
+func establishWit() {
+	log.Println("Establish Witness Range...")
+	currentMilestone := ""
+	actualText := false
+	appIsOpen := false
+	witsearch := regexp.MustCompile(`#M\d+[^\s,"]`)
+	bytexml, err := os.Open("2020_02_19_Collation_NBh 3.xml")
+	if err != nil {
+		panic(err)
+	}
+	defer bytexml.Close()
+	currentChapter := "prelim"
+	decoder := xml.NewDecoder(bytexml)
+	count := 0
+	for {
+		t, _ := decoder.Token()
+		if t == nil {
+			break
+		}
+		switch se := t.(type) {
+		case xml.StartElement:
+			switch se.Name.Local {
+			case "milestone":
+				var milestone Milestone
+				decoder.DecodeElement(&milestone, &se)
+				if milestone.Type == "chapter" && milestone.Type != currentMilestone {
+					currentChapter = milestone.ID
+					actualText = true
+				}
+			case "anchor":
+				if !actualText {
+					// break
+				}
+				witnessRange[currentChapter] = make(map[string]bool)
+				for k, v := range witBool {
+					witnessRange[currentChapter][k] = v
+				}
+				appIsOpen = false
+			case "app":
+				if !appIsOpen {
+					if currentChapter == "prelim" {
+						currentChapter = "3.1.1"
+					}
+				}
+				appIsOpen = true
+				var appdata AppData2
+				decoder.DecodeElement(&appdata, &se)
+				if appdata.Type != "a1" {
+					break
+				}
+				switch {
+				case strings.Contains(appdata.Inner, "witStart"):
+					log.Println("Witness start at", currentChapter)
+					indparts := strings.Split(appdata.Inner, "witStart")
+					for i, v := range indparts {
+						if i == len(indparts)-1 {
+							break
+						}
+						witsl := strings.Split(v, "rdg")
+						for _, v2 := range witsl {
+							witstrs := witsearch.FindAllString(v2, -1)
+							for _, v3 := range witstrs {
+								newwit := strings.Replace(v3, "#", "", -1)
+								witBool[newwit] = true
+							}
+						}
+					}
+				case strings.Contains(appdata.Inner, "witEnd"):
+					log.Println("Witness end at", currentChapter)
+					indparts := strings.Split(appdata.Inner, "witEnd")
+					for i, v := range indparts {
+						if i == len(indparts)-1 {
+							break
+						}
+						witsl := strings.Split(v, "rdg")
+						for _, v2 := range witsl {
+							witstrs := witsearch.FindAllString(v2, -1)
+							for _, v3 := range witstrs {
+								newwit := strings.Replace(v3, "#", "", -1)
+								witBool[newwit] = false
+							}
+						}
+					}
+				default:
+					break
+				}
+			}
+		}
+	}
+	log.Println("Done.", count)
+}
+
 func main() {
-	bytexml, err := os.Open("2020_02_06_Collation_NBh3.xml")
+	establishWit()
+	bytexml, err := os.Open("2020_02_19_Collation_NBh 3.xml")
+	// 2020_02_06_Collation_NBh3.xml
 	if err != nil {
 		panic(err)
 	}
@@ -129,20 +256,26 @@ func main() {
 		os.Exit(1)
 	}
 	var positionMap = map[string]map[string]string{}
-	lemmaCount := 0
+	var secPositionMap = map[string]map[string]string{}
+	lemmaCount := 1
 	basetext := []string{}
 	passageURNs := []string{}
 	passageURN := "start"
-	currentChapter := "PreLim"
+	currentMilestone := ""
+	actualText := false
+	appIsOpen := false
+	appURN := ""
+
+	currentChapter := "prelim"
 	decoder := xml.NewDecoder(bytexml)
 	bodyOpen := false
 	noteOpen := false
 	passageBuffer := ""
 	spaceReg := regexp.MustCompile(`\s+`)
-	actualText := false
-	mileCount := 0
+
+	// flushed := false
+
 	for {
-		// Read tokens from the XML document in a stream.
 		t, _ := decoder.Token()
 		if t == nil {
 			break
@@ -167,7 +300,8 @@ func main() {
 						value := []string{}
 						for _, v2 := range v.Abbrevs {
 							firstid := v2.Name
-							firstid = strings.ReplaceAll(firstid, "^!", "_")
+							resolution := []string{}
+							firstid = strings.ReplaceAll(firstid, "^!", "Note")
 							firstid = strings.ReplaceAll(firstid, "(", "")
 							firstid = strings.ReplaceAll(firstid, ")", "")
 							firstid = strings.TrimSpace(firstid)
@@ -175,13 +309,13 @@ func main() {
 							// You almost cannot see the difference, but there is one!!
 							// firstid = strings.ReplaceAll(firstid, " ", "")
 							firstid = strings.ReplaceAll(firstid, " ", "")
-							log.Println(firstid)
 							if firstid != "" {
 								value = append(value, firstid)
 							}
+							resolution = append(resolution, firstid)
 							for _, v3 := range v2.Extensions {
 								secondid := v3.Name
-								secondid = strings.ReplaceAll(secondid, "^!", "_")
+								secondid = strings.ReplaceAll(secondid, "^!", "Note")
 								secondid = strings.ReplaceAll(secondid, "(", "")
 								secondid = strings.ReplaceAll(secondid, ")", "")
 								secondid = strings.TrimSpace(secondid)
@@ -193,105 +327,151 @@ func main() {
 							}
 						}
 						if key != "" {
-							siglaMap[key] = value
+							siglaMap[key] = strings.Join(value, "_")
 						}
 					}
 				}
 			case "milestone":
 				var milestone Milestone
 				decoder.DecodeElement(&milestone, &se)
-				if milestone.Type == "chapter" {
+				if milestone.Type == "chapter" && milestone.Type != currentMilestone {
 					currentChapter = milestone.ID
-					lemmaCount = 0
-					if mileCount > 0 {
-						actualText = true
-					}
-					mileCount++
+					lemmaCount = 1
+					actualText = true
 				}
-			case "app":
+			case "anchor":
 				if !actualText {
 					break
 				}
-				basetext = append(basetext, passageBuffer)
-				numID := lemmaCount + 1
-				passageURN = currentChapter + "." + fmt.Sprintf("%d", numID)
-				passageURNs = append(passageURNs, passageURN)
-				lemmaCount++
-				passageBuffer = ""
+				var anchor Anchor
+				decoder.DecodeElement(&anchor, &se)
 
+				passageURN = currentChapter + "." + fmt.Sprintf("%d", lemmaCount)
+				basetext = append(basetext, passageBuffer)
+				passageURNs = append(passageURNs, passageURN)
+				passageBuffer = ""
+				// flushed = true
+				lemmaCount++
+				appIsOpen = false
+			case "app":
+				if !appIsOpen {
+					if currentChapter == "prelim" {
+						currentChapter = "3.1.1"
+					}
+					appURN = currentChapter + "." + fmt.Sprintf("%d", lemmaCount)
+				}
+				appIsOpen = true
 				var appdata AppData
 				decoder.DecodeElement(&appdata, &se)
-				for i := range appdata.Variant {
-					old := ""
-					modified := ""
-					witNames := strings.Split(appdata.Variant[i].VariantWitnesses, " ")
-					if appdata.Variant[i].VariantID != "" {
-						for j := range appdata.WitDetails {
-							if appdata.WitDetails[j].Target != appdata.Variant[i].VariantID {
+				for _, variant := range appdata.Variant {
+					witNames := strings.Split(variant.VariantWitnesses, " ")
+					switch {
+					case variant.VariantID != "":
+						for _, witDetails := range appdata.WitDetails {
+							if witDetails.Target != variant.VariantID {
 								continue
 							}
-							old = appdata.WitDetails[j].Wit
-							old = strings.Replace(old, " ", "", -1)
-							old = strings.Replace(old, "#", "", -1)
-							old = strings.Replace(old, "\n", "", -1)
-							cleanedDetails := []string{}
-							for _, hiElem := range appdata.WitDetails[j].Detail {
-								for _, iDetail := range allowedDetail {
-									if iDetail == hiElem {
-										cleanedDetails = append(cleanedDetails, hiElem)
+							witDetStr := witDetails.Wit
+							witDetStr = strings.Replace(witDetStr, " ", "", -1)
+							witDetStr = strings.Replace(witDetStr, "#", "", -1)
+							witDetStr = strings.Replace(witDetStr, "\n", "", -1)
+							detail := strings.TrimSpace(witDetails.Detail)
+							switch detail {
+							case "pc":
+								newkey := strings.Join([]string{witDetStr, detail}, "_")
+								newvalue := strings.Join([]string{siglaMap[witDetStr], detail}, "_")
+								siglaMap[newkey] = newvalue
+								readingvalue := variant.VariantText
+								readingvalue = strings.Replace(readingvalue, "\n", "", -1)
+								if strings.TrimSpace(readingvalue) == "" {
+									readingvalue = "[[om.]]"
+								}
+								if len(secPositionMap[appURN]) == 0 {
+									secPositionMap[appURN] = make(map[string]string)
+								}
+								secWitnessMap[newvalue] = true
+								secPositionMap[appURN][newvalue] = readingvalue
+							case "vl":
+								switch appdata.Type {
+								case "a6":
+									newkey := strings.Join([]string{witDetStr, detail}, "_")
+									newvalue := strings.Join([]string{siglaMap[witDetStr], detail}, "_")
+									siglaMap[newkey] = newvalue
+									readingvalue := variant.VariantText
+									readingvalue = strings.Replace(readingvalue, "\n", "", -1)
+									if strings.TrimSpace(readingvalue) == "" {
+										readingvalue = "[[om.]]"
 									}
+									if len(positionMap[appURN]) == 0 {
+										positionMap[appURN] = make(map[string]string)
+									}
+									witnessMap[newvalue] = true
+									positionMap[appURN][newvalue] = readingvalue
+								default:
+									newkey := strings.Join([]string{witDetStr, detail}, "_")
+									newvalue := strings.Join([]string{siglaMap[witDetStr], detail}, "_")
+									siglaMap[newkey] = newvalue
+									readingvalue := variant.VariantText
+									readingvalue = strings.Replace(readingvalue, "\n", "", -1)
+									if strings.TrimSpace(readingvalue) == "" {
+										readingvalue = "[[om.]]"
+									}
+									if len(secPositionMap[appURN]) == 0 {
+										secPositionMap[appURN] = make(map[string]string)
+									}
+									secWitnessMap[newvalue] = true
+									secPositionMap[appURN][newvalue] = readingvalue
+								}
+							default:
+								if strings.Contains(detail, "pc") {
+									newkey := strings.Join([]string{witDetStr, "2pc"}, "_")
+									newvalue := strings.Join([]string{siglaMap[witDetStr], "2pc"}, "_")
+									siglaMap[newkey] = newvalue
+									readingvalue := variant.VariantText
+									readingvalue = strings.Replace(readingvalue, "\n", "", -1)
+									if strings.TrimSpace(readingvalue) == "" {
+										readingvalue = "[[om.]]"
+									}
+									if len(positionMap[appURN]) == 0 {
+										positionMap[appURN] = make(map[string]string)
+									}
+									witnessMap[newvalue] = true
+									positionMap[appURN][newvalue] = readingvalue
+								} else {
+									// still save without addon
+									readingvalue := variant.VariantText
+									readingvalue = strings.Replace(readingvalue, "\n", "", -1)
+									if strings.TrimSpace(readingvalue) == "" {
+										readingvalue = "[[om.]]"
+									}
+									if len(positionMap[appURN]) == 0 {
+										positionMap[appURN] = make(map[string]string)
+									}
+									resolSigl := siglaMap[witDetStr]
+									witnessMap[resolSigl] = true
+									positionMap[appURN][resolSigl] = readingvalue
 								}
 							}
-							if len(cleanedDetails) > 0 {
-								added := strings.Join(cleanedDetails, "-")
-								modified = old + "__" + added
-							} else {
-								modified = old
-							}
-
 						}
-					}
-					for _, witname := range witNames {
-						witname = strings.Replace(witname, " ", "", -1)
-						witname = strings.Replace(witname, "#", "", -1)
-						witname = strings.Replace(witname, "\n", "", -1)
-						if witname != "" {
-							if witname == old {
-								witname = modified
+					default:
+						for _, witname := range witNames {
+							witDetStr := witname
+							witDetStr = strings.Replace(witDetStr, " ", "", -1)
+							witDetStr = strings.Replace(witDetStr, "#", "", -1)
+							witDetStr = strings.Replace(witDetStr, "\n", "", -1)
+							readingvalue := variant.VariantText
+							readingvalue = strings.Replace(readingvalue, "\n", "", -1)
+							if strings.TrimSpace(readingvalue) == "" {
+								readingvalue = "[[om.]]"
 							}
-							key2 := witname
-							// testing
-							// if len(witnessMap) > 3 {
-							// 	continue
-							// }
-							//
-
-							value := appdata.Variant[i].VariantText
-							value = strings.Replace(value, "\n", "", -1)
-							if strings.TrimSpace(value) == "" {
-								value = "[[om.]]"
+							if len(positionMap[appURN]) == 0 {
+								positionMap[appURN] = make(map[string]string)
 							}
-							if len(positionMap[passageURN]) == 0 {
-								positionMap[passageURN] = make(map[string]string)
-							}
-							keylist := []string{}
-							if strings.Contains(key2, "__") {
-								resolved := strings.Split(key2, "__")
-								key3 := resolved[0]
-								ext := resolved[1]
-								oddkeys := siglaMap[key3]
-								for _, keyv := range oddkeys {
-									newkey := strings.Join([]string{keyv, ext}, "_")
-									keylist = append(keylist, newkey)
-								}
-							} else {
-								keylist = siglaMap[key2]
-							}
-							for _, keyv := range keylist {
-								witnessMap[keyv] = true
-								positionMap[passageURN][keyv] = value
-							}
+							resolSigl := siglaMap[witDetStr]
+							witnessMap[resolSigl] = true
+							positionMap[appURN][resolSigl] = readingvalue
 						}
+
 					}
 				}
 			case "note":
@@ -304,6 +484,7 @@ func main() {
 				break
 			}
 			if bodyOpen && !noteOpen {
+				// flushed = false
 				outputString := string(se)
 				outputString = strings.Replace(outputString, "\n", " ", -1)
 				passageBuffer = passageBuffer + outputString
@@ -314,11 +495,17 @@ func main() {
 		}
 	}
 
+	basetext = append(basetext, passageBuffer)
+	numID := lemmaCount + 1
+	passageURN = currentChapter + "." + fmt.Sprintf("%d", numID)
+	passageURNs = append(passageURNs, passageURN)
+	lemmaCount++
+
+	log.Println(len(basetext))
+	log.Println(len(passageURNs))
+
 	for key, value := range basetext {
 		keyStr := passageURNs[key]
-		// if strings.HasPrefix(keyStr, "PreLim") {
-		// 	continue
-		// }
 		report.WriteString("---------------------------------------------")
 		report.WriteString("\n")
 		alignmentID := "urn:cite2:ducat:alignments.temp:" + keyStr
@@ -327,11 +514,6 @@ func main() {
 		for index, element := range customSplit(value) {
 			idPassage := editionURN + keyStr + "_" + strconv.Itoa(index+1)
 			passages := editionsMap[editionURN]
-			// only for testing
-			if element == "" {
-				element = " "
-			}
-			//
 			tmpPassage := CTSPassage{ID: idPassage, Passage: element}
 			passages = append(passages, tmpPassage)
 			tmpalignment.Token = append(tmpalignment.Token, tmpPassage)
@@ -346,7 +528,7 @@ func main() {
 			witnessURN := passageBase + witkey + ".token:"
 			reading, ok := positionMap[keyStr][witkey]
 			if !ok {
-				reading = value
+				reading = "[[NA]]"
 			}
 			for index, element := range customSplit(reading) {
 				idPassage := witnessURN + keyStr + "_" + strconv.Itoa(index+1)
@@ -374,13 +556,19 @@ func main() {
 	}
 
 	for k, v := range siglaMap {
-		report.WriteString(fmt.Sprintln("key:", k))
-		for i, v2 := range v {
-			report.WriteString(fmt.Sprintln("value:", i, ":", v2))
-		}
+		report.WriteString(fmt.Sprintln("key:", k, "value:", v))
 	}
 	report.WriteString(fmt.Sprintln("Parsed", len(alignments), "lemmata..."))
 	log.Println("Parsed", len(alignments), "lemmata...")
+	log.Println(len(basetext))
+
+	for k, v := range witnessRange {
+		report.WriteString("______________________________")
+		report.WriteString(fmt.Sprintln("Passage:", k))
+		for k2, v2 := range v {
+			report.WriteString(fmt.Sprintln("key:", k2, "value:", v2))
+		}
+	}
 	writeCEX()
 }
 
